@@ -9,6 +9,7 @@ pub mod auth;
 pub mod domain;
 #[path = "api/internal.rs"]
 pub mod internal_api;
+pub mod local_ipc;
 pub mod manager_client;
 pub mod storage;
 

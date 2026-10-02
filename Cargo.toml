@@ -27,7 +27,6 @@ bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
-libc = "0.2"
 rand = "0.8"
 regex = "1"
 rpassword = "7"
@@ -42,6 +41,16 @@ tower = "0.5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+interprocess = { version = "2.4.2", features = ["tokio"] }
+same-file = "1"
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
+widestring = "1.0"
+win-security-identifier = "0.1.1"
 
 [dev-dependencies]
 tempfile = "3"
