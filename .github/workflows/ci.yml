@@ -1,6 +1,7 @@
 # Минимальная проверка службы на Linux и Windows. Выпусков здесь нет.
-# Идентичность src/local_ipc с оригиналом в b-v8-session-manager в одном репозитории
-# проверить нельзя: она сверяется при приёмке (diff двух каталогов).
+# Идентичность src/local_ipc с b-v8-session-manager сторожит контрольная сумма local_ipc.sha256
+# (одна и та же в обоих репозиториях): правка модуля в одном месте без второго ломает проверку.
+# Полное сравнение двух каталогов (diff -r) выполняется при приёмке.
 name: ci
 
 on:
@@ -16,6 +17,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Контрольная сумма local_ipc
+        if: runner.os != 'Windows'
+        run: |
+          cd src/local_ipc
+          test "$(cat mod.rs policy.rs tests.rs unix.rs windows.rs | sha256sum | cut -d' ' -f1)" = "$(cat ../../local_ipc.sha256)"
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --locked
       - run: cargo test --locked
