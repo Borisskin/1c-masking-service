@@ -193,10 +193,11 @@ pull worker (тик MASKING_PULL_INTERVAL_SECONDS) → durable-очередь v2
 таблицы сохранено). На старте сервис ставит intent на каждую enabled-базу,
 Admin-мутации добавляют свои.
 
-### Internal API (UDS `MASKING_SOCKET_PATH`)
+### Internal API (локальный канал `MASKING_SOCKET_PATH`)
 
-Не публикуется TCP, не для браузера; каждый peer проверяется по UID
-(`MASKING_MANAGER_UID`). Лимит JSON body — `MASKING_MAX_BODY_BYTES`
+Не публикуется TCP, не для браузера; каждый peer проверяется: в Linux по UID
+(`MASKING_MANAGER_UID`), в Windows по SID и пути `.exe`
+(`MASKING_MANAGER_SID`, `MASKING_MANAGER_EXE`). Лимит JSON body — `MASKING_MAX_BODY_BYTES`
 (8 МиБ по умолчанию).
 
 - `POST /internal/v1/calls/preflight` — readiness базы/инструмента, резолв
@@ -228,13 +229,15 @@ Admin-мутации добавляют свои.
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `MASKING_DATABASE_PATH` | `/var/lib/1c-masking/service.sqlite3` | SQLite (WAL, foreign keys, mode `0600`) |
-| `MASKING_SOCKET_PATH` | `/run/1c-masking/service.sock` | internal API, mode `0660` |
-| `MASKING_CONTROL_SOCKET_PATH` | `/run/1c-masking/control.sock` | bootstrap первого Admin, mode `0600` |
+| `MASKING_DATABASE_PATH` | Linux: `/var/lib/1c-masking/service.sqlite3`; Windows: **обязательна**, умолчания нет | SQLite (WAL, foreign keys; Linux: mode `0600`) |
+| `MASKING_SOCKET_PATH` | Linux: `/run/1c-masking/service.sock`; Windows: `\\.\pipe\1c-masking-service` | internal API (Linux: mode `0660`) |
+| `MASKING_CONTROL_SOCKET_PATH` | Linux: `/run/1c-masking/control.sock`; Windows: `\\.\pipe\1c-masking-control` | bootstrap первого Admin (Linux: mode `0600`; Windows: только учётная запись службы) |
 | `MASKING_HUMAN_BIND` | `127.0.0.1:8787` | TCP listener human API/UI |
 | `MASKING_EXPECTED_ORIGIN` | обязательна | точный Origin human API (буквальное сравнение) |
-| `MASKING_MANAGER_UID` | euid процесса | ожидаемый peer UID на `service.sock` и при подключении к `manager.sock` |
-| `MASKING_MANAGER_SOCKET_PATH` | обязательна | UDS-listener менеджера (`POST /internal/v1/tools/call`) — путь pull worker-а |
+| `MASKING_MANAGER_UID` | Linux: euid процесса; Windows: задавать нельзя | ожидаемый peer UID на `service.sock` и при подключении к `manager.sock` |
+| `MASKING_MANAGER_SID` | Windows: SID текущего процесса; Linux: задавать нельзя | ожидаемая учётная запись менеджера |
+| `MASKING_MANAGER_EXE` | Windows: **обязательна**, умолчания нет; Linux: задавать нельзя | абсолютный путь к `v8-session-manager.exe`; сравнивается файл процесса на другом конце канала |
+| `MASKING_MANAGER_SOCKET_PATH` | обязательна (Windows: например `\\.\pipe\1c-masking-manager`) | канал менеджера (`POST /internal/v1/tools/call`) — адрес pull worker-а |
 | `MASKING_PULL_INTERVAL_SECONDS` | `10` (1–300) | период тика pull worker; за тик до 10 intents |
 | `MASKING_MANAGER_CALL_TIMEOUT_SECONDS` | `30` (1–120) | дедлайн одного tool.call к менеджеру |
 | `MASKING_MAX_BODY_BYTES` | `8388608` (1 КиБ–64 МиБ) | лимит JSON body internal API |
@@ -257,9 +260,36 @@ Admin-мутации добавляют свои.
 | `MASKING_DRY_RUN_TIMEOUT_MS` | `10000` (500–60000) | дедлайн сухого прогона |
 | `RUST_LOG` | `info` | фильтр `tracing`, compact без timestamp |
 
-Родительские каталоги сокетов и БД создаются процессом. Если
+Родительские каталоги сокетов (Linux) и БД создаются процессом. Если
 `MASKING_MANAGER_UID` не задан, gate доверяет UID самого сервиса — это не
 замена отдельному service account.
+
+Параметр чужой ОС (`MASKING_MANAGER_UID` в Windows, `MASKING_MANAGER_SID` или
+`MASKING_MANAGER_EXE` в Linux) — ошибка запуска: служба называет переменную,
+но не печатает её значение. Адрес, не подходящий текущей ОС (например,
+относительный путь сокета в Linux или удалённое имя канала `\\host\pipe\...` в
+Windows), тоже отвергается при запуске.
+
+### Запуск в Windows из PowerShell
+
+Системные службы Windows не устанавливаются: процесс запускается вручную от
+обычного пользователя. Допущение: машина, на которой работают службы,
+недоступна агентам, а учётная запись, под которой запущены служба и менеджер,
+не имеет прав администратора на этой машине. Права каталога данных в Windows
+пока не ужесточаются программой (вопрос отложен): выберите каталог, доступный
+только этой учётной записи. `MASKING_MANAGER_EXE` задаётся явно, умолчания нет.
+
+```powershell
+$env:MASKING_DATABASE_PATH = 'C:\masking\data\service.sqlite3'
+$env:MASKING_EXPECTED_ORIGIN = 'http://127.0.0.1:8787'
+$env:MASKING_SOCKET_PATH = '\\.\pipe\1c-masking-service'
+$env:MASKING_CONTROL_SOCKET_PATH = '\\.\pipe\1c-masking-control'
+$env:MASKING_MANAGER_SOCKET_PATH = '\\.\pipe\1c-masking-manager'
+$env:MASKING_MANAGER_EXE = 'C:\masking\bin\v8-session-manager.exe'
+# $env:MASKING_MANAGER_SID по умолчанию равен SID текущей учётной записи
+.\masking-service.exe              # служба
+.\masking-service.exe admin bootstrap   # пароль первого Admin (интерактивная консоль)
+```
 
 ## Human UI
 

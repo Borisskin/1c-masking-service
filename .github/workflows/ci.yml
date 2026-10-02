@@ -1,0 +1,34 @@
+# Минимальная проверка службы на Linux и Windows. Выпусков здесь нет.
+# Идентичность src/local_ipc с оригиналом в b-v8-session-manager в одном репозитории
+# проверить нельзя: она сверяется при приёмке (diff двух каталогов).
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --locked
+      - run: cargo test --locked
+      - run: cargo build --release --locked --bin masking-service
+      - name: Артефакт (Linux)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: masking-service-${{ runner.os }}
+          path: target/release/masking-service
+      - name: Артефакт (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: masking-service-${{ runner.os }}
+          path: target/release/masking-service.exe
