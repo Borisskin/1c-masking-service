@@ -23,7 +23,7 @@ jobs:
         run: |
           cd src/local_ipc
           test "$(cat mod.rs policy.rs tests.rs unix.rs windows.rs | sha256sum | cut -d' ' -f1)" = "$(cat ../../local_ipc.sha256)"
-      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --locked
       - run: cargo test --locked
       - run: cargo build --release --locked --bin masking-service
