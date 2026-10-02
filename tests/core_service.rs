@@ -1,13 +1,12 @@
 mod common;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use onec_masking_service::{
     domain::{
         DatabaseMode, ErrorCode, FieldSources, FinalizeOutcome, FinalizeRequest, PolicyRule,
         PolicySnapshot, PreflightRequest, RuleAction, RuleSelector, SCHEMA_VERSION,
     },
-    manager_client::ManagerClient,
     AppState, SqliteStorage,
 };
 use serde_json::{json, Value};
@@ -1691,7 +1690,7 @@ async fn unavailable_manager_and_call_rejection_keep_durable_intent() {
     let (state, database_id) = configured_state(DatabaseMode::Enabled).await;
 
     // Несуществующий сокет — transport failure.
-    let dead = ManagerClient::new(PathBuf::from("/nonexistent/manager.sock"), None);
+    let dead = common::dead_client();
     enqueue_refresh_intent(&state.storage, database_id);
     assert_eq!(
         state.masking.refresh_due_intents(&dead, 10).await.unwrap(),

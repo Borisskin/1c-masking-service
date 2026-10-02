@@ -12,7 +12,7 @@ use onec_masking_service::{
         DatabaseMode, ErrorCode, FieldSources, FinalizeOutcome, FinalizeRequest, PolicyRule,
         RuleAction, RuleSelector,
     },
-    internal_api::UdsConnectInfo,
+    local_ipc::PeerInfo,
     internal_app, AppState, SqliteStorage,
 };
 use serde_json::{json, Value};
@@ -118,7 +118,7 @@ fn json_request(uri: &str, value: Value) -> Request<Body> {
         .unwrap();
     request
         .extensions_mut()
-        .insert(ConnectInfo(UdsConnectInfo { uid: None }));
+        .insert(ConnectInfo(PeerInfo { authorized: true }));
     request
 }
 
@@ -150,9 +150,8 @@ async fn internal_router_respects_configured_body_limit_before_handler() {
     }
 
     assert_eq!(std::env::var("MASKING_MAX_BODY_BYTES").unwrap(), "1024");
-    let peer_uid = 222;
     let storage = Arc::new(SqliteStorage::in_memory().unwrap());
-    let state = AppState::new_with_peer_uid(storage, "https://masking.test", peer_uid);
+    let state = AppState::new(storage, "https://masking.test");
     let app = internal_app(state);
     let database_id = Uuid::new_v4();
     let preflight = json!({
@@ -195,9 +194,7 @@ async fn internal_router_respects_configured_body_limit_before_handler() {
         let mut small_request = json_request(route, small);
         small_request
             .extensions_mut()
-            .insert(ConnectInfo(UdsConnectInfo {
-                uid: Some(peer_uid),
-            }));
+            .insert(ConnectInfo(PeerInfo { authorized: true }));
         let small_response = app.clone().oneshot(small_request).await.unwrap();
         // Limit отпускает маленькое тело до handler: неизвестная БД —
         // ACTION_REQUIRED (CONFLICT), не отказ уровня transport.
@@ -208,9 +205,7 @@ async fn internal_router_respects_configured_body_limit_before_handler() {
         let mut large_request = json_request(route, large);
         large_request
             .extensions_mut()
-            .insert(ConnectInfo(UdsConnectInfo {
-                uid: Some(peer_uid),
-            }));
+            .insert(ConnectInfo(PeerInfo { authorized: true }));
         let response = app.clone().oneshot(large_request).await.unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let response_body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
@@ -748,3 +743,29 @@ async fn all_mode_cold_start_expands_wildcard_selectors_after_metadata_pull() {
     assert!(rendered.contains("[MASK:v1:ORG:"));
 }
 //++agent TASK-222
+
+#[tokio::test]
+async fn internal_router_rejects_unauthorized_or_unknown_peer_with_401() {
+    let storage = Arc::new(SqliteStorage::in_memory().unwrap());
+    let app = internal_app(AppState::new(storage, "https://masking.test"));
+    let uri = "/internal/v1/health/live";
+
+    let mut denied = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    denied
+        .extensions_mut()
+        .insert(ConnectInfo(PeerInfo { authorized: false }));
+    let response = app.clone().oneshot(denied).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // Нет сведений о пире вообще — тоже отказ.
+    let unknown = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let response = app.clone().oneshot(unknown).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    let mut allowed = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    allowed
+        .extensions_mut()
+        .insert(ConnectInfo(PeerInfo { authorized: true }));
+    let response = app.oneshot(allowed).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}

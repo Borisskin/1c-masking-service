@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
+    serve::IncomingStream,
     extract::{
         connect_info::{ConnectInfo, Connected},
         rejection::JsonRejection,
@@ -13,7 +14,6 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::net::UnixListener;
 use uuid::Uuid;
 
 use crate::{
@@ -21,11 +21,11 @@ use crate::{
         FinalizeRequest, FinalizeResponse, PreflightRequest, PreflightResponse, ServiceError,
         TerminalEventRequest, TerminalEventResponse,
     },
+    local_ipc::{self, PeerInfo},
     AppState,
 };
 
 pub fn router(state: Arc<AppState>) -> Router {
-    let expected_peer_uid = state.expected_peer_uid;
     Router::new()
         .route("/internal/v1/calls/preflight", post(preflight))
         .route("/internal/v1/calls/finalize", post(finalize))
@@ -43,42 +43,51 @@ pub fn router(state: Arc<AppState>) -> Router {
             1024,
             64 * 1024 * 1024,
         )))
-        .layer(middleware::from_fn_with_state(
-            expected_peer_uid,
-            peer_uid_gate,
-        ))
+        .layer(middleware::from_fn(peer_gate))
         .with_state(state)
 }
 
-#[derive(Clone, Debug)]
-pub struct UdsConnectInfo {
-    pub uid: Option<u32>,
-}
+/// Слушатель `local_ipc` для `axum::serve`: соединение приходит вместе с [`PeerInfo`], который
+/// затем читает [`peer_gate`]. Кто допущен, задано при создании слушателя (`Access::allow`).
+pub struct AxumListener(pub local_ipc::Listener);
 
-impl Connected<axum::serve::IncomingStream<'_, UnixListener>> for UdsConnectInfo {
-    fn connect_info(stream: axum::serve::IncomingStream<'_, UnixListener>) -> Self {
-        Self {
-            uid: stream
-                .io()
-                .peer_cred()
-                .ok()
-                .map(|credentials| credentials.uid()),
+impl axum::serve::Listener for AxumListener {
+    type Io = local_ipc::Stream;
+    type Addr = PeerInfo;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok(accepted) => return accepted,
+                Err(error) => {
+                    // Как Axum для TCP: временная ошибка приёма не должна останавливать службу.
+                    tracing::warn!(event = "ipc_accept_failed", %error);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
         }
     }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "local address is not available for local IPC",
+        ))
+    }
 }
 
-async fn peer_uid_gate(
-    State(expected): State<Option<u32>>,
-    request: Request,
-    next: Next,
-) -> Response {
-    let Some(ConnectInfo(peer)) = request.extensions().get::<ConnectInfo<UdsConnectInfo>>() else {
-        return ServiceError::unauthorized(Uuid::nil()).into_response();
-    };
-    if expected.is_some_and(|uid| peer.uid != Some(uid)) {
-        return ServiceError::unauthorized(Uuid::nil()).into_response();
+impl Connected<IncomingStream<'_, AxumListener>> for PeerInfo {
+    fn connect_info(stream: IncomingStream<'_, AxumListener>) -> Self {
+        *stream.remote_addr()
     }
-    next.run(request).await
+}
+
+/// Пускает только соединения, прошедшие проверку слушателя; нет сведений о пире — отказ.
+async fn peer_gate(request: Request, next: Next) -> Response {
+    match request.extensions().get::<ConnectInfo<PeerInfo>>() {
+        Some(ConnectInfo(peer)) if peer.authorized => next.run(request).await,
+        _ => ServiceError::unauthorized(Uuid::nil()).into_response(),
+    }
 }
 
 async fn preflight(

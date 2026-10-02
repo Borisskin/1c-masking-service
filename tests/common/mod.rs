@@ -4,18 +4,17 @@
 //! постановки durable refresh intent + прогон pull worker.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use onec_masking_service::{
     domain::{FeedDictionaryValue, FeedMetadataItem},
+    local_ipc::{Access, Endpoint, Listener, Peer},
     manager_client::ManagerClient,
     AppState, SqliteStorage,
 };
 use serde_json::{json, Value};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::UnixListener,
     task::JoinHandle,
 };
 use uuid::Uuid;
@@ -29,14 +28,51 @@ pub type ToolCall = (String, Value);
 /// Ответ фейкового менеджера: `Ok(result)` → `{"success":true,"result":..}`,
 /// `Err(code)` → `{"success":false,"error":{"code":..}}` — отказ вызова
 /// уровня `/internal/v1/tools/call` (не путать со страничным `success:false`).
+/// Адрес стенда. Временный каталог (Unix) живёт, пока жив адрес.
+pub struct TestEndpoint {
+    pub endpoint: Endpoint,
+    _dir: Option<tempfile::TempDir>,
+}
+
+/// Единственная платформенная функция стенда: уникальный адрес для текущей ОС.
+#[cfg(unix)]
+pub fn test_endpoint() -> TestEndpoint {
+    let dir = tempfile::tempdir().unwrap();
+    let endpoint = Endpoint::parse(&dir.path().join("manager.sock")).unwrap();
+    TestEndpoint {
+        endpoint,
+        _dir: Some(dir),
+    }
+}
+
+/// Единственная платформенная функция стенда: уникальный адрес для текущей ОС.
+#[cfg(windows)]
+pub fn test_endpoint() -> TestEndpoint {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let name = format!(
+        r"\\.\pipe\masking-test-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    TestEndpoint {
+        endpoint: Endpoint::parse(std::path::Path::new(&name)).unwrap(),
+        _dir: None,
+    }
+}
+
+/// Клиент к адресу, на котором никто не слушает: каждый вызов — `Transport`.
+pub fn dead_client() -> ManagerClient {
+    ManagerClient::new(test_endpoint().endpoint, Peer::current_process().unwrap())
+}
+
 pub type Responder = Arc<dyn Fn(&str, &Value) -> Result<Value, String> + Send + Sync>;
 
 /// Фейковый менеджер: принимает HTTP/1.1 запросы на UDS, маршрутизирует по
 /// `name` в замыкании-ответчике и записывает все вызовы для assertions.
 pub struct FakeManager {
-    socket_path: PathBuf,
+    endpoint: TestEndpoint,
     calls: Arc<Mutex<Vec<ToolCall>>>,
-    _dir: tempfile::TempDir,
     _task: JoinHandle<()>,
 }
 
@@ -44,15 +80,15 @@ impl FakeManager {
     pub fn spawn(
         responder: impl Fn(&str, &Value) -> Result<Value, String> + Send + Sync + 'static,
     ) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("manager.sock");
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        let endpoint = test_endpoint();
+        let mut listener = Listener::bind(&endpoint.endpoint, Access::default()).unwrap();
         let calls: Arc<Mutex<Vec<ToolCall>>> = Arc::new(Mutex::new(Vec::new()));
         let task_calls = calls.clone();
         let responder: Responder = Arc::new(responder);
         let task = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
+                    tokio::task::yield_now().await;
                     continue;
                 };
                 let calls = task_calls.clone();
@@ -63,15 +99,17 @@ impl FakeManager {
             }
         });
         Self {
-            socket_path,
+            endpoint,
             calls,
-            _dir: dir,
             _task: task,
         }
     }
 
     pub fn client(&self) -> ManagerClient {
-        ManagerClient::new(self.socket_path.clone(), None)
+        ManagerClient::new(
+            self.endpoint.endpoint.clone(),
+            Peer::current_process().unwrap(),
+        )
     }
 
     /// Зафиксированные вызовы `(name, arguments)` в порядке поступления.
@@ -90,11 +128,11 @@ impl FakeManager {
 }
 
 async fn serve(
-    stream: tokio::net::UnixStream,
+    stream: onec_masking_service::local_ipc::Stream,
     calls: Arc<Mutex<Vec<ToolCall>>>,
     responder: Responder,
 ) -> std::io::Result<()> {
-    let (mut reader, mut writer) = stream.into_split();
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let mut buffer = Vec::new();
     let mut header_end = None;
     while header_end.is_none() {
@@ -150,7 +188,7 @@ async fn serve(
     );
     writer.write_all(response.as_bytes()).await?;
     writer.write_all(&payload).await?;
-    writer.shutdown().await
+    writer.flush().await
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {

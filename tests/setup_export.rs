@@ -12,7 +12,7 @@ use axum::{
     extract::connect_info::ConnectInfo,
     http::{Request, StatusCode},
 };
-use onec_masking_service::{internal_api::UdsConnectInfo, internal_app, AppState, SqliteStorage};
+use onec_masking_service::{local_ipc::PeerInfo, internal_app, AppState, SqliteStorage};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -25,7 +25,7 @@ fn get_request(uri: &str) -> Request<Body> {
         .unwrap();
     request
         .extensions_mut()
-        .insert(ConnectInfo(UdsConnectInfo { uid: None }));
+        .insert(ConnectInfo(PeerInfo { authorized: true }));
     request
 }
 

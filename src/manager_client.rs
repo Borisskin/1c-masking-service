@@ -1,11 +1,10 @@
 //++agent TASK-222 [05.10.2026]
-//! Клиент к v8-session-manager по Unix domain socket: единственный вызов —
+//! Клиент к v8-session-manager по локальному каналу (`local_ipc`: Unix-сокет или именованный канал Windows): единственный вызов —
 //! `POST /internal/v1/tools/call` для internal feed-инструментов
 //! (metadata/dictionary pull). Это не универсальный MCP-клиент: сервис не
 //! ходит на `/mcp` и не использует Ed25519-assertions — внутренний endpoint
-//! защищён peer-UID на стороне менеджера.
+//! защищён проверкой пира на стороне менеджера.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -15,7 +14,8 @@ use hyper::{Method, Request};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::net::UnixStream;
+
+use crate::local_ipc::{self, Endpoint, Peer};
 
 /// Request bound: selector+cursor — маленький фиксированный JSON.
 const MAX_REQUEST_BYTES: usize = 1024 * 1024;
@@ -42,18 +42,19 @@ pub enum ManagerClientError {
 /// Типизированный HTTP/1.1 клиент к manager UDS.
 #[derive(Debug, Clone)]
 pub struct ManagerClient {
-    socket_path: PathBuf,
-    /// Ожидаемый UID владельца сокета (`MASKING_MANAGER_UID`) — защита от
-    /// подключения к чужому сокету; `None` отключает проверку (тесты).
-    expected_uid: Option<u32>,
+    endpoint: Endpoint,
+    /// Ожидаемый менеджер (`MASKING_MANAGER_UID` или `MASKING_MANAGER_SID`/`_EXE`) —
+    /// защита от подключения к чужому серверу.
+    peer: Peer,
     call_timeout: Duration,
 }
 
 impl ManagerClient {
-    pub fn new(socket_path: PathBuf, expected_uid: Option<u32>) -> Self {
+    /// Клиент к менеджеру по `endpoint`; сервер обязан соответствовать `peer`.
+    pub fn new(endpoint: Endpoint, peer: Peer) -> Self {
         Self {
-            socket_path,
-            expected_uid,
+            endpoint,
+            peer,
             call_timeout: Duration::from_secs(bounded_env_u64(
                 "MASKING_MANAGER_CALL_TIMEOUT_SECONDS",
                 30,
@@ -81,7 +82,7 @@ impl ManagerClient {
             "arguments": arguments,
         });
         let body = serde_json::to_vec(&body).map_err(|_| ManagerClientError::InvalidResponse)?;
-        let attempt = request_bytes(&self.socket_path, self.expected_uid, TOOLS_CALL_PATH, body);
+        let attempt = request_bytes(&self.endpoint, &self.peer, TOOLS_CALL_PATH, body);
         let response = tokio::time::timeout(self.call_timeout, attempt)
             .await
             .map_err(|_| ManagerClientError::Timeout)??;
@@ -90,26 +91,18 @@ impl ManagerClient {
 }
 
 async fn request_bytes(
-    socket_path: &Path,
-    expected_uid: Option<u32>,
+    endpoint: &Endpoint,
+    peer: &Peer,
     path: &str,
     body: Vec<u8>,
 ) -> Result<Vec<u8>, ManagerClientError> {
     if body.len() > MAX_REQUEST_BYTES {
         return Err(ManagerClientError::InvalidResponse);
     }
-    let stream = UnixStream::connect(socket_path)
+    // Неверный сервер (Untrusted) и сбой подключения (Io) — одинаково Transport, как прежде.
+    let stream = local_ipc::connect(endpoint, Some(peer))
         .await
         .map_err(|_| ManagerClientError::Transport)?;
-    if let Some(expected) = expected_uid {
-        let uid = stream
-            .peer_cred()
-            .map_err(|_| ManagerClientError::Transport)?
-            .uid();
-        if uid != expected {
-            return Err(ManagerClientError::Transport);
-        }
-    }
     let (mut sender, connection) = http1::handshake(TokioIo::new(stream))
         .await
         .map_err(|_| ManagerClientError::Transport)?;

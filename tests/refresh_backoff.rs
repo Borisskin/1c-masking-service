@@ -26,7 +26,7 @@ use common::{empty_feed_responder, enqueue_refresh_intent, FakeManager};
 /// Клиент к несуществующему UDS — каждый pull падает
 /// `MANAGER_UNAVAILABLE` (Transient) до первой страницы.
 fn dead_client() -> ManagerClient {
-    ManagerClient::new("/nonexistent/masked-manager.sock".into(), None)
+    common::dead_client()
 }
 
 fn admin() -> Principal {

@@ -19,7 +19,6 @@ pub struct AppState {
     pub masking: Arc<domain::MaskingService>,
     pub storage: Arc<SqliteStorage>,
     pub expected_origin: String,
-    pub expected_peer_uid: Option<u32>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,20 +35,6 @@ impl AppState {
             masking: Arc::new(domain::MaskingService::new(storage.clone())),
             storage,
             expected_origin: expected_origin.into(),
-            expected_peer_uid: None,
-        })
-    }
-
-    pub fn new_with_peer_uid(
-        storage: Arc<SqliteStorage>,
-        expected_origin: impl Into<String>,
-        expected_peer_uid: u32,
-    ) -> Arc<Self> {
-        Arc::new(Self {
-            masking: Arc::new(domain::MaskingService::new(storage.clone())),
-            storage,
-            expected_origin: expected_origin.into(),
-            expected_peer_uid: Some(expected_peer_uid),
         })
     }
 }
